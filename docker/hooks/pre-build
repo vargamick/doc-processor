@@ -1,0 +1,16 @@
+#!/bin/bash
+
+# Get the directory of this script
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Run the validation script
+$DIR/../validate.sh
+
+# If validation fails, prevent the build
+if [ $? -ne 0 ]; then
+    echo "❌ Pre-build validation failed. Build aborted."
+    exit 1
+fi
+
+echo "✅ Pre-build validation passed. Proceeding with build..."
+exit 0

@@ -1,0 +1,90 @@
+{
+  "folders": [
+    {
+      "name": "Doc Processor",
+      "path": "."
+    },
+    {
+      "name": "Backend",
+      "path": "backend"
+    },
+    {
+      "name": "Frontend",
+      "path": "frontend"
+    },
+    {
+      "name": "Parser Service",
+      "path": "parser-service"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/.git": true,
+      "**/.DS_Store": true,
+      "**/node_modules": true,
+      "**/__pycache__": true,
+      "**/venv": true
+    },
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": null,
+    "[python]": {
+      "editor.defaultFormatter": "ms-python.python"
+    },
+    "[typescript][typescriptreact]": {
+      "editor.defaultFormatter": "esbenp.prettier-vscode"
+    },
+    "python.analysis.extraPaths": [
+      "./backend",
+      "./parser-service"
+    ]
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "dbaeumer.vscode-eslint",
+      "esbenp.prettier-vscode",
+      "ms-azuretools.vscode-docker",
+      "ms-vscode.vscode-typescript-tslint-plugin",
+      "streetsidesoftware.code-spell-checker"
+    ]
+  },
+  "launch": {
+    "configurations": [
+      {
+        "name": "Backend: FastAPI",
+        "type": "python",
+        "request": "launch",
+        "module": "uvicorn",
+        "args": [
+          "app.main:app",
+          "--reload",
+          "--port",
+          "8000"
+        ],
+        "cwd": "${workspaceFolder}/backend"
+      },
+      {
+        "name": "Frontend: Dev Server",
+        "type": "node",
+        "request": "launch",
+        "cwd": "${workspaceFolder}/frontend",
+        "runtimeExecutable": "npm",
+        "runtimeArgs": ["run", "dev"]
+      },
+      {
+        "name": "Parser Service",
+        "type": "python",
+        "request": "launch",
+        "module": "uvicorn",
+        "args": [
+          "app.main:app",
+          "--reload",
+          "--port",
+          "8001"
+        ],
+        "cwd": "${workspaceFolder}/parser-service"
+      }
+    ]
+  }
+}
