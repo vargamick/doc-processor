@@ -1,0 +1,12 @@
+sqlalchemy
+psycopg2-binary
+torch
+sentence-transformers
+nltk
+langdetect
+redis
+python-docx
+pdf2image
+pytesseract
+pydantic
+PyPDF2
