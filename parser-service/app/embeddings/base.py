@@ -1,13 +1,34 @@
-from typing import List, Optional, Dict, Any, Union, Sequence, cast, TypeVar, overload
+from typing import (
+    List,
+    Optional,
+    Dict,
+    Any,
+    Union,
+    Sequence,
+    cast,
+    TypeVar,
+    overload,
+    Type,
+    Callable,
+)
+import os
 import torch
 from sentence_transformers import SentenceTransformer
 import redis
 import json
 import hashlib
 import numpy as np
+import logging
 from numpy.typing import NDArray
 from pydantic import BaseModel
+from .cache import EmbeddingCache, CacheConfig
+from .batch import DynamicBatchProcessor, DynamicBatchConfig, BatchPriority
 
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# Callback type for progress updates
+ProgressCallback = Callable[[float, int, int], None]
 
 # Type aliases for better readability
 T = TypeVar("T", bound=Union[float, np.float32, np.float64])
@@ -31,6 +52,10 @@ class EmbeddingConfig(BaseModel):
     cache_ttl: int = 3600  # 1 hour cache TTL
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # Dynamic batch processing settings
+    dynamic_batching: bool = True
+    batch_config: Optional[DynamicBatchConfig] = None
+
 
 class EmbeddingProcessor:
     """Base class for generating and managing embeddings"""
@@ -39,6 +64,11 @@ class EmbeddingProcessor:
         self.config = config or EmbeddingConfig()
         self.model = self._initialize_model()
         self.cache = self._initialize_cache() if self.config.cache_enabled else None
+        self.batch_processor = (
+            DynamicBatchProcessor(self.config.batch_config)
+            if self.config.dynamic_batching
+            else None
+        )
 
     def _initialize_model(self) -> SentenceTransformer:
         """Initialize the sentence transformer model"""
@@ -49,26 +79,25 @@ class EmbeddingProcessor:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize embedding model: {str(e)}")
 
-    def _initialize_cache(self) -> Optional[redis.Redis]:
-        """Initialize Redis cache connection"""
+    def _initialize_cache(self) -> Optional["EmbeddingCache"]:
+        """Initialize Redis cache"""
         try:
-            import os
-
-            return redis.Redis(
+            config = CacheConfig(
                 host=os.getenv("REDIS_HOST", "redis"),
                 port=int(os.getenv("REDIS_PORT", "6379")),
                 db=int(os.getenv("REDIS_DB", "0")),
-                decode_responses=True,
-                socket_timeout=5,
-                socket_connect_timeout=5,
+                pool_size=int(os.getenv("REDIS_POOL_SIZE", "10")),
+                socket_timeout=int(os.getenv("REDIS_TIMEOUT", "5")),
+                compression_threshold=int(
+                    os.getenv("REDIS_COMPRESSION_THRESHOLD", "1024")
+                ),
+                max_item_size=int(os.getenv("REDIS_MAX_ITEM_SIZE", "1048576")),  # 1MB
+                default_ttl=int(os.getenv("REDIS_TTL", "3600")),  # 1 hour
             )
+            return EmbeddingCache(config)
         except Exception as e:
-            print(f"Warning: Failed to initialize Redis cache: {str(e)}")
+            logger.warning(f"Failed to initialize Redis cache: {str(e)}")
             return None
-
-    def _get_cache_key(self, text: str) -> str:
-        """Generate a cache key for the given text"""
-        return f"emb:{hashlib.md5(text.encode()).hexdigest()}"
 
     @overload
     def _tensor_to_list(self, tensor: FloatTensor) -> List[float]: ...
@@ -81,12 +110,15 @@ class EmbeddingProcessor:
     ) -> Union[List[float], List[List[float]]]:
         """Convert PyTorch tensor or list of tensors to list format"""
         if isinstance(tensor, list):
-            return [t.detach().cpu().numpy().tolist() for t in tensor]
-        return tensor.detach().cpu().numpy().tolist()
+            result = [t.detach().cpu().numpy().tolist() for t in tensor]
+            return cast(List[List[float]], result)
+        result = tensor.detach().cpu().numpy().tolist()
+        return cast(List[float], result)
 
     def _array_to_list(self, array: FloatArray) -> List[float]:
         """Convert numpy array to list of floats"""
-        return array.tolist()
+        result = array.tolist()
+        return cast(List[float], result)
 
     def _ensure_device_compatibility(self, tensor: FloatTensor) -> FloatTensor:
         """Ensure tensor is on the correct device"""
@@ -98,7 +130,8 @@ class EmbeddingProcessor:
         """Convert single model output to list format"""
         try:
             if isinstance(output, torch.Tensor):
-                return self._tensor_to_list(self._ensure_device_compatibility(output))
+                result = self._tensor_to_list(self._ensure_device_compatibility(output))
+                return cast(List[float], result)
             if isinstance(output, np.ndarray):
                 return self._array_to_list(output)
             if isinstance(output, list) and all(
@@ -108,7 +141,8 @@ class EmbeddingProcessor:
                 tensors = cast(List[FloatTensor], output)
                 # Concatenate tensors if multiple are returned
                 combined = torch.cat(tensors, dim=0)
-                return self._tensor_to_list(combined)
+                result = self._tensor_to_list(combined)
+                return cast(List[float], result)
             raise TypeError(f"Unsupported output type: {type(output)}")
         except Exception as e:
             raise RuntimeError(f"Failed to convert model output: {str(e)}")
@@ -117,20 +151,24 @@ class EmbeddingProcessor:
         """Convert batch model output to list format"""
         try:
             if isinstance(output, torch.Tensor):
-                return cast(
-                    List[List[float]],
-                    self._tensor_to_list(self._ensure_device_compatibility(output)),
-                )
+                result = self._tensor_to_list(self._ensure_device_compatibility(output))
+                return cast(List[List[float]], result)
             if isinstance(output, np.ndarray):
-                return cast(List[List[float]], self._array_to_list(output))
+                result = self._array_to_list(output)
+                return cast(List[List[float]], [result])
             if isinstance(output, list) and all(
                 isinstance(t, torch.Tensor) for t in output
             ):
                 # Handle list of tensors
-                return cast(List[List[float]], self._tensor_to_list(output))
+                result = [self._tensor_to_list(t) for t in output]
+                return cast(List[List[float]], result)
             raise TypeError(f"Unsupported batch output type: {type(output)}")
         except Exception as e:
             raise RuntimeError(f"Failed to convert batch output: {str(e)}")
+
+    def _get_cache_key(self, text: str) -> str:
+        """Generate a cache key for the given text"""
+        return hashlib.md5(text.encode()).hexdigest()
 
     def _get_from_cache(self, text: str) -> Optional[List[float]]:
         """Retrieve embeddings from cache if available"""
@@ -138,12 +176,15 @@ class EmbeddingProcessor:
             return None
 
         try:
-            cached_value = self.cache.get(self._get_cache_key(text))
-            if isinstance(cached_value, str):
-                return cast(List[float], json.loads(cached_value))
+            result = self.cache.get(self._get_cache_key(text))
+            if isinstance(result, list) and all(
+                isinstance(x, (int, float)) for x in result
+            ):
+                return cast(List[float], result)
+            return None
         except Exception as e:
-            print(f"Warning: Cache retrieval failed: {str(e)}")
-        return None
+            logger.warning(f"Cache retrieval failed: {str(e)}")
+            return None
 
     def _store_in_cache(self, text: str, embedding: List[float]) -> None:
         """Store embeddings in cache"""
@@ -151,11 +192,12 @@ class EmbeddingProcessor:
             return
 
         try:
-            self.cache.setex(
-                self._get_cache_key(text), self.config.cache_ttl, json.dumps(embedding)
-            )
+            if isinstance(embedding, list) and all(
+                isinstance(x, (int, float)) for x in embedding
+            ):
+                self.cache.set(self._get_cache_key(text), embedding)
         except Exception as e:
-            print(f"Warning: Cache storage failed: {str(e)}")
+            logger.warning(f"Cache storage failed: {str(e)}")
 
     def generate_embedding(self, text: str) -> List[float]:
         """Generate embedding for a single text"""
@@ -176,14 +218,78 @@ class EmbeddingProcessor:
         except Exception as e:
             raise RuntimeError(f"Failed to generate embedding: {str(e)}")
 
-    def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for a batch of texts"""
-        # Initialize results list
+    def generate_embeddings_batch(
+        self,
+        texts: List[str],
+        priority: BatchPriority = BatchPriority.MEDIUM,
+        progress_callback: Optional[ProgressCallback] = None,
+    ) -> List[List[float]]:
+        """Generate embeddings for a batch of texts with priority and progress tracking"""
+        if not texts:
+            return []
+
+        if not self.config.dynamic_batching or not self.batch_processor:
+            return self._generate_embeddings_simple_batch(texts)
+
+        # Add texts to batch processor
+        for text in texts:
+            self.batch_processor.add_item(text, priority)
+
+        def process_batch(batch_texts: List[str]) -> List[List[float]]:
+            # Check cache for each text
+            results: List[List[float]] = []
+            texts_to_embed: List[str] = []
+            cache_indices: Dict[int, str] = {}
+
+            for i, text in enumerate(batch_texts):
+                cached = self._get_from_cache(text)
+                if cached:
+                    results.append(cached)
+                else:
+                    texts_to_embed.append(text)
+                    cache_indices[len(texts_to_embed) - 1] = text
+
+            if texts_to_embed:
+                try:
+                    batch_embeddings = self.model.encode(
+                        texts_to_embed,
+                        batch_size=self.config.batch_size,
+                        show_progress_bar=False,
+                    )
+
+                    batch_results = self._convert_batch_output(batch_embeddings)
+                    for i, embedding_list in enumerate(batch_results):
+                        original_text = cache_indices[i]
+                        self._store_in_cache(original_text, embedding_list)
+                        results.append(embedding_list)
+
+                except Exception as e:
+                    raise RuntimeError(f"Failed to generate batch embeddings: {str(e)}")
+
+            return results
+
+        # Process queue with progress tracking
+        total_texts = len(texts)
+        if progress_callback:
+
+            def wrapped_processor(batch: List[str]) -> List[List[float]]:
+                result = process_batch(batch)
+                processed = len(result)
+                progress_callback(
+                    (processed / total_texts) * 100, processed, total_texts
+                )
+                return result
+
+            return self.batch_processor.process_queue(wrapped_processor)
+
+        return self.batch_processor.process_queue(process_batch)
+
+    def _generate_embeddings_simple_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings using simple batching without priority or progress tracking"""
         results: List[List[float]] = []
         texts_to_embed: List[str] = []
         cache_indices: Dict[int, str] = {}
 
-        # Check cache for each text
         for i, text in enumerate(texts):
             cached = self._get_from_cache(text)
             if cached:
@@ -192,7 +298,6 @@ class EmbeddingProcessor:
                 texts_to_embed.append(text)
                 cache_indices[len(texts_to_embed) - 1] = text
 
-        # Generate embeddings for texts not in cache
         if texts_to_embed:
             try:
                 batch_embeddings = self.model.encode(
@@ -201,7 +306,6 @@ class EmbeddingProcessor:
                     show_progress_bar=False,
                 )
 
-                # Process and cache new embeddings
                 batch_results = self._convert_batch_output(batch_embeddings)
                 for i, embedding_list in enumerate(batch_results):
                     original_text = cache_indices[i]
@@ -215,11 +319,17 @@ class EmbeddingProcessor:
 
     def get_model_info(self) -> Dict[str, Any]:
         """Get information about the current model configuration"""
-        return {
+        info = {
             "model_name": self.config.model_name,
             "max_seq_length": self.config.max_seq_length,
             "device": self.config.device,
             "cache_enabled": self.config.cache_enabled,
             "embedding_dimension": self.model.get_sentence_embedding_dimension(),
             "batch_size": self.config.batch_size,
+            "dynamic_batching": self.config.dynamic_batching,
         }
+
+        if self.batch_processor:
+            info.update(self.batch_processor.get_stats())
+
+        return info
