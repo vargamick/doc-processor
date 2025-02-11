@@ -1,0 +1,23 @@
+# Core dependencies
+fastapi>=0.68.0
+uvicorn>=0.15.0
+python-multipart>=0.0.5
+pydantic>=1.8.2
+
+# Document processing
+PyMuPDF>=1.19.0  # PDF processing
+python-docx>=0.8.11  # DOCX processing
+sentence-transformers>=2.2.0  # Text embeddings
+torch>=1.9.0  # Required by sentence-transformers
+numpy>=1.21.0  # Array operations
+scikit-learn>=0.24.2  # Text processing utilities
+
+# Database
+sqlalchemy>=1.4.23
+psycopg2-binary>=2.9.1
+alembic>=1.7.1
+
+# Utilities
+python-dateutil>=2.8.2
+tenacity>=8.0.1  # Retry logic
+loguru>=0.5.3  # Better logging

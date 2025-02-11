@@ -1,8 +1,12 @@
 import sys
 import os
+import logging
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 import psycopg2
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -10,7 +14,7 @@ sys.path.append(project_root)
 
 from backend.models import Base, Document, ProcessingStatus, Embedding
 from parser_service.app.processors.factory import ProcessorFactory
-from parser_service.app.embeddings.base import EmbeddingProcessor
+from parser_service.app.embeddings import EmbeddingModelFactory
 
 
 def check_database_schema():
@@ -88,16 +92,17 @@ def check_document_processors():
                     else:
                         print(f"✗ Missing required method: {method}")
 
-                # Check embedding processor configuration if available
-                if processor.embedding_processor:
-                    print("\nEmbedding processor configuration:")
-                    model_info = processor.embedding_processor.get_model_info()
+                # Check embedding model configuration
+                if hasattr(processor, "_embedding_model"):
+                    print("\nEmbedding model configuration:")
+                    model_info = processor._embedding_model.get_model_info()
                     for key, value in model_info.items():
                         print(f"  - {key}: {value}")
             else:
                 print(f"✗ Failed to create {doc_type} processor")
         except Exception as e:
             print(f"✗ Error testing {doc_type} processor: {str(e)}")
+            logger.exception(f"Processor test failed for {doc_type}")
 
 
 def check_embedding_system():
@@ -105,24 +110,43 @@ def check_embedding_system():
     print("\n=== Checking Embedding System ===")
 
     try:
-        processor = EmbeddingProcessor()
+        # Check available models
+        available_models = EmbeddingModelFactory.available_models()
+        print("\nAvailable embedding models:")
+        for model_name in available_models:
+            print(f"- {model_name}")
+
+        # Test default model
+        processor = EmbeddingModelFactory.create_model()
         model_info = processor.get_model_info()
 
         print("\nEmbedding Configuration:")
         for key, value in model_info.items():
             print(f"- {key}: {value}")
 
-        # Test embedding generation
+        # Test single embedding generation
         test_text = "This is a test document for embedding generation."
-        embedding = processor.generate_embedding(test_text)
+        embedding = processor.encode(test_text)
+        print(
+            f"\n✓ Successfully generated single embedding with dimension {len(embedding)}"
+        )
 
-        print(f"\n✓ Successfully generated embedding with dimension {len(embedding)}")
+        # Test batch embedding generation
+        test_texts = [
+            "This is the first test document.",
+            "This is the second test document.",
+            "This is the third test document.",
+        ]
+        embeddings = processor.encode_batch(test_texts)
+        print(
+            f"✓ Successfully generated batch embeddings: {len(embeddings)} embeddings of dimension {len(embeddings[0])}"
+        )
+
+        return True
 
     except Exception as e:
         print(f"\n✗ Embedding system check failed: {str(e)}")
         return False
-
-    return True
 
 
 def main():

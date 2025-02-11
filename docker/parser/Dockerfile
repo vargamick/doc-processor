@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy requirements first for better caching
-COPY parser-service/requirements.txt .
+COPY parser_service/requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
@@ -19,7 +19,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN python -c "import nltk; nltk.download('punkt'); nltk.download('stopwords')"
 
 # Copy application code
-COPY parser-service/ .
+COPY parser_service/ .
 
 # Create data directory
 RUN mkdir -p data && chmod 777 data
